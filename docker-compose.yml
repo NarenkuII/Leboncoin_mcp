@@ -1,0 +1,29 @@
+services:
+  leboncoin-mcp:
+    build: .
+    container_name: leboncoin-mcp
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      MCP_TRANSPORT: http
+      PORT: 3000
+      MCP_OAUTH_ENABLED: ${MCP_OAUTH_ENABLED:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      OAUTH_ISSUER: ${OAUTH_ISSUER:-${PUBLIC_BASE_URL:-http://localhost:3000}}
+      OAUTH_TOKEN_TTL_SECONDS: ${OAUTH_TOKEN_TTL_SECONDS:-3600}
+      LEBONCOIN_PROXY_URL: ${LEBONCOIN_PROXY_URL:-}
+      LEBONCOIN_COOKIE: ${LEBONCOIN_COOKIE:-}
+      LEBONCOIN_USER_AGENT: ${LEBONCOIN_USER_AGENT:-}
+    volumes:
+      - leboncoin_mcp_data:/app/.data
+    networks:
+      - default
+      - n8n-mcp
+
+volumes:
+  leboncoin_mcp_data:
+
+networks:
+  n8n-mcp:
+    external: true

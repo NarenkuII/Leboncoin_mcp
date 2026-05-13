@@ -1,0 +1,27 @@
+{
+  "name": "leboncoin-mcp",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server for Leboncoin search, details, watchlists, and price analysis.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "start:http": "node -e \"process.env.MCP_TRANSPORT='http'; import('./dist/index.js')\"",
+    "check": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "undici": "^8.2.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
