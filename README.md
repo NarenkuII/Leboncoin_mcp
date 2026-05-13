@@ -23,8 +23,8 @@ LEBONCOIN_PROXY_URL=http://user:password@host:port
 LEBONCOIN_COOKIE="datadome=..."
 LEBONCOIN_USER_AGENT="Mozilla/5.0 ..."
 MCP_OAUTH_ENABLED=true
-PUBLIC_BASE_URL=https://lbc-mcp.duckdns.org
-OAUTH_ISSUER=https://lbc-mcp.duckdns.org
+PUBLIC_BASE_URL=https://your-private-mcp.example.com
+OAUTH_ISSUER=https://your-private-mcp.example.com
 ```
 
 ## Claude Desktop config
@@ -117,8 +117,8 @@ For a ChatGPT workspace app, do not protect the reverse proxy with a hardcoded B
 
 ```env
 MCP_OAUTH_ENABLED=true
-PUBLIC_BASE_URL=https://lbc-mcp.duckdns.org
-OAUTH_ISSUER=https://lbc-mcp.duckdns.org
+PUBLIC_BASE_URL=https://your-private-mcp.example.com
+OAUTH_ISSUER=https://your-private-mcp.example.com
 ```
 
 The server then exposes:
@@ -130,7 +130,7 @@ The server then exposes:
 
 Unauthenticated MCP requests return a `WWW-Authenticate` challenge pointing ChatGPT to the protected resource metadata. ChatGPT completes the authorization-code + PKCE flow, receives a Bearer access token, and sends that token on `/mcp`, `/sse`, and `/messages`.
 
-OAuth is only enforced for requests whose `Host` or `X-Forwarded-Host` matches `PUBLIC_BASE_URL`. This lets public ChatGPT traffic through `https://lbc-mcp.duckdns.org` require OAuth while LAN/Docker calls such as `http://192.168.1.18:3000/sse` or `http://leboncoin-mcp:3000/sse` remain usable without OAuth.
+OAuth is only enforced for requests whose `Host` or `X-Forwarded-Host` matches `PUBLIC_BASE_URL`. Keep any public endpoint private or OAuth-protected; LAN/Docker calls such as `http://192.168.1.18:3000/sse` or `http://leboncoin-mcp:3000/sse` remain usable without OAuth when they do not match `PUBLIC_BASE_URL`.
 
 ## Tools
 

@@ -56,7 +56,7 @@ const WEB_BASE = "https://www.leboncoin.fr";
 const PAGE_SIZE = 35;
 const DATA_DIR = path.join(process.cwd(), ".data");
 const WATCHES_FILE = path.join(DATA_DIR, "watches.json");
-const publicBaseUrl = (process.env.PUBLIC_BASE_URL ?? "https://lbc-mcp.duckdns.org").replace(/\/$/, "");
+const publicBaseUrl = (process.env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 const oauthIssuer = (process.env.OAUTH_ISSUER ?? publicBaseUrl).replace(/\/$/, "");
 const oauthEnabled = process.env.MCP_OAUTH_ENABLED === "true";
 const oauthTokenTtlSeconds = Number(process.env.OAUTH_TOKEN_TTL_SECONDS ?? 3600);
