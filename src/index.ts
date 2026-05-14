@@ -65,6 +65,7 @@ const publicHost = new URL(publicBaseUrl).host.toLowerCase();
 
 const proxyUrl = process.env.LEBONCOIN_PROXY_URL;
 const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
+const jinaReaderBase = process.env.JINA_READER_BASE || "https://r.jina.ai/http://r.jina.ai/http://";
 
 const userAgent =
   process.env.LEBONCOIN_USER_AGENT ||
@@ -118,6 +119,10 @@ async function http(url: string, init: RequestInit = {}) {
     dispatcher,
     headers: mergedHeaders
   } as Parameters<typeof undiciFetch>[1]);
+}
+
+function jinaUrl(url: string) {
+  return `${jinaReaderBase}${url}`;
 }
 
 function categoryId(category?: string) {
@@ -257,8 +262,111 @@ async function searchViaHtml(args: SearchArgs) {
   return { source: "html", total, ads, url: firstUrl };
 }
 
+function parseEuroPrice(value: string) {
+  const normalized = value.replace(/\s/g, "").replace(",", ".");
+  const price = Number.parseFloat(normalized);
+  return Number.isFinite(price) ? price : undefined;
+}
+
+function parseJinaSearchMarkdown(markdown: string, limit: number) {
+  const totalMatch =
+    markdown.match(/##\s+Résultats de recherche\s*:\s*([\d\s]+)\s+annonces/i) ??
+    markdown.match(/\n([\d\s]+)\s+annonces\s*\n/i);
+  const total = totalMatch ? Number.parseInt(totalMatch[1].replace(/\s/g, ""), 10) : undefined;
+  const ads: NormalizedListing[] = [];
+  const seen = new Set<string>();
+  const adPattern =
+    /\*\s+\[\]\((https:\/\/www\.leboncoin\.fr\/ad\/[^)\s]+\/(\d+))\)([\s\S]*?)(?=\n\*\s+(?:\[\]\(https:\/\/www\.leboncoin\.fr\/ad\/|Sponsorisé)|\n\* {4,}!\[Image|\n\s*$)/g;
+
+  for (const match of markdown.matchAll(adPattern)) {
+    if (ads.length >= limit) break;
+    const [, url, id, rawBlock] = match;
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    const image = rawBlock.match(/!\[[^\]]*]\((https:\/\/img\.leboncoin\.fr\/[^)]+)\)/)?.[1];
+    const priceMatch = rawBlock.match(/\n\s*([\d\s]+(?:[,.]\d{1,2})?)€\s*\n/);
+    const price = parseEuroPrice(priceMatch?.[1] ?? "");
+    const category = rawBlock.match(/Catégorie\s*:\s*([^\n.]+)/i)?.[1]?.trim();
+    const location = rawBlock.match(/Située?\s+à\s+([^\n.]+)/i)?.[1]?.trim();
+    const hasProfessionalSeller = /Vendeur professionnel/i.test(rawBlock);
+    const hasDelivery = /Livraison possible/i.test(rawBlock);
+
+    const textBeforePrice = priceMatch ? rawBlock.slice(0, priceMatch.index) : rawBlock;
+    const titleFromLead = textBeforePrice
+      .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+      .replace(/Annonce à la une\./gi, " ")
+      .replace(/À la une/gi, " ")
+      .replace(/Annonce\s+\./gi, " ")
+      .replace(/Sponsorisé/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const lines = rawBlock
+      .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const title =
+      titleFromLead ||
+      (lines.find(
+        (line) =>
+          !line.startsWith("À la une") &&
+          !line.startsWith("Annonce à la une") &&
+          !line.startsWith("Prix:") &&
+          !line.startsWith("Catégorie :") &&
+          !line.startsWith("Située à") &&
+          !/^\d/.test(line) &&
+          !/^(Baisse de prix|Livraison possible|Vendeur professionnel|Pro)$/.test(line)
+      ) ?? "");
+
+    ads.push({
+      id,
+      title,
+      price,
+      url,
+      description: "",
+      category: category ?? "",
+      publishedAt: undefined,
+      location: location ?? "",
+      owner: hasProfessionalSeller ? { name: undefined, type: "pro" } : undefined,
+      hasPhone: undefined,
+      image,
+      attributes: hasDelivery ? { Livraison: "possible" } : {}
+    });
+  }
+
+  return { total: Number.isFinite(total) ? total : undefined, ads };
+}
+
+async function searchViaJina(args: SearchArgs) {
+  const requestedLimit = Math.min(args.limit ?? 10, PAGE_SIZE);
+  const url = buildSearchUrl({ ...args, limit: requestedLimit, offset: args.offset ?? 0 });
+  const res = await http(jinaUrl(url.toString()), {
+    headers: {
+      accept: "text/markdown,text/plain;q=0.9,*/*;q=0.8",
+      origin: "",
+      referer: ""
+    }
+  });
+  const markdown = await res.text();
+  if (!res.ok) throw new Error(`Jina search fallback failed ${res.status}: ${markdown.slice(0, 220)}`);
+  const parsed = parseJinaSearchMarkdown(markdown, requestedLimit);
+  if (!parsed.ads.length) throw new Error("Jina search fallback did not find listings in the rendered page.");
+  return { source: "jina", total: parsed.total, ads: parsed.ads, url: url.toString() };
+}
+
 async function search(args: SearchArgs) {
-  return await searchViaHtml(args);
+  try {
+    return await searchViaHtml(args);
+  } catch (htmlError) {
+    try {
+      return await searchViaJina(args);
+    } catch (jinaError) {
+      const htmlMessage = htmlError instanceof Error ? htmlError.message : String(htmlError);
+      const jinaMessage = jinaError instanceof Error ? jinaError.message : String(jinaError);
+      throw new Error(`Leboncoin search failed. HTML fallback: ${htmlMessage}. Jina fallback: ${jinaMessage}`);
+    }
+  }
 }
 
 async function batchSearch(args: {

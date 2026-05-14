@@ -15,6 +15,7 @@ services:
       LEBONCOIN_PROXY_URL: ${LEBONCOIN_PROXY_URL:-}
       LEBONCOIN_COOKIE: ${LEBONCOIN_COOKIE:-}
       LEBONCOIN_USER_AGENT: ${LEBONCOIN_USER_AGENT:-}
+      JINA_READER_BASE: ${JINA_READER_BASE:-https://r.jina.ai/http://r.jina.ai/http://}
     volumes:
       - leboncoin_mcp_data:/app/.data
     networks:
