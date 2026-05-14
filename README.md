@@ -3,9 +3,10 @@
 Low-resource MCP server for Leboncoin. Search uses the public SSR search page:
 
 - `GET https://www.leboncoin.fr/recherche?...`, parsing `__NEXT_DATA__`.
+- `GET https://r.jina.ai/http://r.jina.ai/http://https://www.leboncoin.fr/recherche?...` as a rendered Markdown fallback when DataDome blocks direct HTML.
 - `GET https://api.leboncoin.fr/finder/classified/{id}` for listing details.
 
-Leboncoin currently protects `/finder/search` with DataDome for raw HTTP. The server keeps that API path implemented for endpoint checks, but search tools use the normal search page directly.
+Leboncoin currently protects `/finder/search` and sometimes the normal search page with DataDome for raw HTTP. The server keeps the API path implemented for endpoint checks, uses the normal search page first, then falls back to the Jina reader rendering when direct HTML returns a challenge.
 
 If `LEBONCOIN_USER_AGENT` is unset or empty, the server sends a browser-like default user agent.
 
@@ -22,6 +23,7 @@ Optional environment variables:
 LEBONCOIN_PROXY_URL=http://user:password@host:port
 LEBONCOIN_COOKIE="datadome=..."
 LEBONCOIN_USER_AGENT="Mozilla/5.0 ..."
+JINA_READER_BASE=https://r.jina.ai/http://r.jina.ai/http://
 MCP_OAUTH_ENABLED=true
 PUBLIC_BASE_URL=https://your-private-mcp.example.com
 OAUTH_ISSUER=https://your-private-mcp.example.com
@@ -57,6 +59,14 @@ Health check:
 curl http://localhost:3000/health
 ```
 
+For the mini PC deployment in this workspace, the intended LAN endpoint is:
+
+```text
+http://192.168.1.18:3010/mcp
+```
+
+Keep `HOST_PORT=3010` in the deployment `.env` before running `docker compose up --build -d`.
+
 The container exposes:
 
 - `http://localhost:3000/mcp` for MCP Streamable HTTP clients.
@@ -68,7 +78,10 @@ Use a proxy by creating a local `.env` next to `docker-compose.yml`:
 ```env
 LEBONCOIN_PROXY_URL=http://user:password@host:port
 LEBONCOIN_COOKIE=datadome=optional_cookie
+JINA_READER_BASE=https://r.jina.ai/http://r.jina.ai/http://
 ```
+
+The Jina fallback is enabled by default. It parses rendered Markdown, so search results include the main listing fields but can be less complete than the direct Leboncoin JSON/SSR payload.
 
 ## Codex
 
