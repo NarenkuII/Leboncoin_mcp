@@ -6,6 +6,7 @@ Low-resource MCP server for Leboncoin. Search uses the public SSR search page:
 - `GET https://r.jina.ai/http://https://www.leboncoin.fr/recherche?...` as a rendered Markdown fallback when DataDome blocks direct HTML.
 - `obscura fetch https://www.leboncoin.fr/recherche?... --dump html` as an optional browser-rendered fallback.
 - `GET https://api.leboncoin.fr/finder/classified/{id}` for listing details.
+- `GET https://r.jina.ai/http://https://www.leboncoin.fr/ad/{category}/{id}` as a listing-details fallback when the details API is blocked.
 
 Leboncoin currently protects `/finder/search` and sometimes the normal search page with DataDome for raw HTTP. The server keeps the API path implemented for endpoint checks, uses the normal search page first, then falls back to Jina rendering and finally Obscura rendering when direct HTML returns a challenge.
 
@@ -99,6 +100,10 @@ Set `LEBONCOIN_COOKIE_ENABLED=false` to temporarily bypass the cookie without re
 
 The Jina fallback is enabled by default and bypasses `LEBONCOIN_PROXY_URL` unless `JINA_PROXY_ENABLED=true`. It parses rendered Markdown, so search results include the main listing fields but can be less complete than the direct Leboncoin JSON/SSR payload.
 
+Some Jina-rendered search pages include normal ad URLs; others include only compact text rows. The server supports both formats. Compact rows return stable synthetic IDs such as `jina-...` and may not include image or listing URL fields. Use full Leboncoin listing URLs when you need `get_listing_details` while the API is blocked.
+
+Listing details use the Leboncoin details API first. If that API is blocked and the input is a full listing URL, the server falls back to Jina-rendered listing pages and returns title, price, category, location, seller, images, description, and key attributes. If the input is only a numeric ID, the fallback cannot infer the category URL, so ID-only details still depend on the API path.
+
 The Obscura fallback is also supported and expects the `obscura` binary to be available on `PATH`, or `OBSCURA_BIN` to point to the extracted executable. It reuses `LEBONCOIN_PROXY_URL` when the proxy is enabled.
 
 ## Codex
@@ -169,11 +174,16 @@ OAuth is only enforced for requests whose `Host` or `X-Forwarded-Host` matches `
 - `check_endpoints`: probes the important endpoints and shows payload templates.
 - `search_listings`: searches listings with filters.
 - `batch_search_listings`: runs up to 20 searches in one MCP call, in parallel, then deduplicates listings by ID.
-- `get_listing_details`: gets full details from a listing URL or ID.
-- `get_listing_details_batch`: gets full details for up to 50 listing URLs or IDs in one MCP call.
+- `get_listing_details`: gets full details from a listing URL or ID. Full URLs can use the Jina fallback if the API is blocked.
+- `get_listing_details_batch`: gets full details for up to 50 listing URLs or IDs in one MCP call. Full URLs can use the Jina fallback if the API is blocked.
 - `analyze_market_price`: compares a target price/listing with similar results.
 - `search_multi_region`: runs searches across multiple departments/zipcodes.
 - `watch_new_listings`: stores/checks watch definitions and returns newly seen ads.
+
+Latest smoke test coverage against the built MCP:
+
+- Passing through Jina fallback with direct Leboncoin HTTP forced to fail: `check_config`, `check_endpoints`, `search_listings`, `batch_search_listings`, `search_multi_region`, `analyze_market_price`, `watch_new_listings`, `get_listing_details`, and `get_listing_details_batch`.
+- `check_endpoints` may still report `searchApi`, direct `searchHtml`, Obscura, or `detailApi` as blocked. That is diagnostic output; normal search/detail tools can still succeed through Jina fallback.
 
 For n8n agents, prefer the batch tools when checking product variants:
 

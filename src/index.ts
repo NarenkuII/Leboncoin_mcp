@@ -303,7 +303,22 @@ function parseEuroPrice(value: string) {
   return Number.isFinite(price) ? price : undefined;
 }
 
-function parseJinaSearchMarkdown(markdown: string, limit: number) {
+function syntheticJinaId(title: string, price?: number, location?: string) {
+  return `jina-${createHash("sha1").update(`${title}|${price ?? ""}|${location ?? ""}`).digest("hex").slice(0, 12)}`;
+}
+
+function cleanJinaTitle(value: string) {
+  return value
+    .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+    .replace(/Annonce à la une\./gi, " ")
+    .replace(/Annonce urgente\./gi, " ")
+    .replace(/À la une/gi, " ")
+    .replace(/Sponsorisé/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseJinaSearchMarkdown(markdown: string, limit: number, sourceUrl?: string) {
   const totalMatch =
     markdown.match(/##\s+Résultats de recherche\s*:\s*([\d\s]+)\s+annonces/i) ??
     markdown.match(/\n([\d\s]+)\s+annonces\s*\n/i);
@@ -328,14 +343,7 @@ function parseJinaSearchMarkdown(markdown: string, limit: number) {
     const hasDelivery = /Livraison possible/i.test(rawBlock);
 
     const textBeforePrice = priceMatch ? rawBlock.slice(0, priceMatch.index) : rawBlock;
-    const titleFromLead = textBeforePrice
-      .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
-      .replace(/Annonce à la une\./gi, " ")
-      .replace(/À la une/gi, " ")
-      .replace(/Annonce\s+\./gi, " ")
-      .replace(/Sponsorisé/gi, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const titleFromLead = cleanJinaTitle(textBeforePrice.replace(/Annonce\s+\./gi, " "));
     const lines = rawBlock
       .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
       .split(/\r?\n/)
@@ -370,6 +378,40 @@ function parseJinaSearchMarkdown(markdown: string, limit: number) {
     });
   }
 
+  if (!ads.length) {
+    const compactAdPattern = /\*\s+([\s\S]*?Prix:\s*[\d\s]+(?:[,.]\d{1,2})?€[\s\S]*?)(?=\n\*\s+|\n\s*$)/g;
+    for (const match of markdown.matchAll(compactAdPattern)) {
+      if (ads.length >= limit) break;
+      const rawBlock = match[1];
+      const priceMatch = rawBlock.match(/Prix:\s*([\d\s]+(?:[,.]\d{1,2})?)€/i);
+      const price = parseEuroPrice(priceMatch?.[1] ?? "");
+      const category = rawBlock.match(/Catégorie\s*:\s*([^\n.]+)/i)?.[1]?.trim();
+      const location = rawBlock.match(/Située?\s+à\s+([^\n.]+)/i)?.[1]?.trim();
+      const hasProfessionalSeller = /Vendeur professionnel/i.test(rawBlock);
+      const hasDelivery = /Livraison possible/i.test(rawBlock);
+      const title = cleanJinaTitle(priceMatch ? rawBlock.slice(0, priceMatch.index) : rawBlock);
+      if (!title) continue;
+      const id = syntheticJinaId(title, price, location);
+      if (seen.has(id)) continue;
+      seen.add(id);
+
+      ads.push({
+        id,
+        title,
+        price,
+        url: sourceUrl ?? "",
+        description: "",
+        category: category ?? "",
+        publishedAt: undefined,
+        location: location ?? "",
+        owner: hasProfessionalSeller ? { name: undefined, type: "pro" } : undefined,
+        hasPhone: undefined,
+        image: undefined,
+        attributes: hasDelivery ? { Livraison: "possible" } : {}
+      });
+    }
+  }
+
   return { total: Number.isFinite(total) ? total : undefined, ads };
 }
 
@@ -394,12 +436,77 @@ async function searchViaJina(args: SearchArgs) {
       failures.push(`${url} failed ${res.status}: ${markdown.slice(0, 160)}`);
       continue;
     }
-    const parsed = parseJinaSearchMarkdown(markdown, requestedLimit);
+    const parsed = parseJinaSearchMarkdown(markdown, requestedLimit, url);
     if (parsed.ads.length) return { source: "jina", total: parsed.total, ads: parsed.ads, url };
     failures.push(`${url} did not contain parsable ad links`);
   }
 
   throw new Error(`Jina search fallback did not find listings in the rendered page. ${failures.join("; ")}`);
+}
+
+async function fetchJinaMarkdown(url: string) {
+  const res = await undiciFetch(jinaUrl(url), {
+    dispatcher: jinaProxyEnabled ? dispatcher : undefined,
+    headers: {
+      accept: "text/markdown,text/plain;q=0.9,*/*;q=0.8",
+      "user-agent": userAgent,
+      "accept-language": "fr-FR,fr;q=0.9,en;q=0.8"
+    }
+  } as Parameters<typeof undiciFetch>[1]);
+  const markdown = await res.text();
+  if (!res.ok) throw new Error(`Jina fetch failed ${res.status}: ${markdown.slice(0, 220)}`);
+  return markdown;
+}
+
+function parseJinaDetailsMarkdown(markdown: string, sourceUrl: string) {
+  if (/404 - Page introuvable|Target URL returned error 404/i.test(markdown)) {
+    throw new Error("Jina details fallback returned a 404 page.");
+  }
+  const id = extractListingId(sourceUrl);
+  const h1 = markdown.match(/^#\s+(.+?)(?:\s+-\s+([^\n]+))?\s*$/m);
+  const title = (h1?.[1] ?? markdown.match(/^Title:\s*([^\n]+)/m)?.[1] ?? "").trim();
+  const category =
+    h1?.[2]?.trim() ??
+    markdown.match(/\n\d+\.\s+\[([^\]]+)]\(https:\/\/www\.leboncoin\.fr\/c\//)?.[1]?.trim() ??
+    "";
+  const price = parseEuroPrice(markdown.match(/\n\s*([\d\s]+(?:[,.]\d{1,2})?)€\s*\n/)?.[1] ?? "");
+  const location =
+    markdown.match(/\nÀ\s+([^\n]+)\n/)?.[1]?.trim() ??
+    markdown.match(/\n\d+\.\s+\[([^\]]+\d{5}[^\]]*)]\(https:\/\/www\.leboncoin\.fr\/cl\//)?.[1]?.trim() ??
+    "";
+  const image = markdown.match(/!\[[^\]]*]\((https:\/\/img\.leboncoin\.fr\/[^)]+)\)/)?.[1];
+  const imageUrls = Array.from(markdown.matchAll(/!\[[^\]]*]\((https:\/\/img\.leboncoin\.fr\/[^)]+)\)/g)).map((match) => match[1]);
+  const description = (
+    markdown.match(/## Description\s+([\s\S]*?)(?:\nVoir plus|\n## Modes de remise|\n## Vendu par|\n## Options de l'annonce|$)/)?.[1] ?? ""
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  const seller = markdown.match(/## Vendu par[\s\S]*?\n\[([^\]]+)]\(https:\/\/www\.leboncoin\.fr\/profile\//)?.[1]?.trim();
+  const publishedAt = markdown.match(/\n(\d{1,2}\s+[^\n]+20\d{2}[^\n]*)\n\nÀ\s+/)?.[1]?.trim();
+  const attributesBlock = markdown.match(/## Les informations clés\s+([\s\S]*?)(?:\n## Description|\n## Modes de remise|\n## Vendu par|$)/)?.[1] ?? "";
+  const attributeLines = attributesBlock
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const attributes: Record<string, string> = {};
+  for (let index = 0; index + 1 < attributeLines.length; index += 2) {
+    attributes[attributeLines[index]] = attributeLines[index + 1];
+  }
+
+  return {
+    id,
+    title,
+    price,
+    url: sourceUrl,
+    description,
+    category,
+    publishedAt,
+    location,
+    owner: seller ? { name: seller, type: undefined } : undefined,
+    hasPhone: undefined,
+    image: image ?? imageUrls[0],
+    attributes
+  };
 }
 
 async function searchViaObscura(args: SearchArgs) {
@@ -502,12 +609,26 @@ function extractListingId(input: string) {
 
 async function getDetails(idOrUrl: string) {
   const id = extractListingId(idOrUrl);
-  const res = await http(`${API_BASE}/finder/classified/${id}`, {
-    headers: { referer: `${WEB_BASE}/ad/${id}` }
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Details endpoint failed ${res.status}: ${text.slice(0, 220)}`);
-  return normalizeListing(JSON.parse(text));
+  try {
+    const res = await http(`${API_BASE}/finder/classified/${id}`, {
+      headers: { referer: `${WEB_BASE}/ad/${id}` }
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Details endpoint failed ${res.status}: ${text.slice(0, 220)}`);
+    return normalizeListing(JSON.parse(text));
+  } catch (apiError) {
+    if (!/^https?:\/\//i.test(idOrUrl)) {
+      const apiMessage = apiError instanceof Error ? apiError.message : String(apiError);
+      throw new Error(`Details endpoint failed and Jina fallback needs a full listing URL for ID-only input. API error: ${apiMessage}`);
+    }
+    try {
+      return parseJinaDetailsMarkdown(await fetchJinaMarkdown(idOrUrl), idOrUrl);
+    } catch (jinaError) {
+      const apiMessage = apiError instanceof Error ? apiError.message : String(apiError);
+      const jinaMessage = jinaError instanceof Error ? jinaError.message : String(jinaError);
+      throw new Error(`Details endpoint failed. API: ${apiMessage}. Jina fallback: ${jinaMessage}`);
+    }
+  }
 }
 
 async function getDetailsBatch(listings: string[]) {
