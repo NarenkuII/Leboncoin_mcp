@@ -3,10 +3,11 @@
 Low-resource MCP server for Leboncoin. Search uses the public SSR search page:
 
 - `GET https://www.leboncoin.fr/recherche?...`, parsing `__NEXT_DATA__`.
-- `GET https://r.jina.ai/http://r.jina.ai/http://https://www.leboncoin.fr/recherche?...` as a rendered Markdown fallback when DataDome blocks direct HTML.
+- `GET https://r.jina.ai/http://https://www.leboncoin.fr/recherche?...` as a rendered Markdown fallback when DataDome blocks direct HTML.
+- `obscura fetch https://www.leboncoin.fr/recherche?... --dump html` as an optional browser-rendered fallback.
 - `GET https://api.leboncoin.fr/finder/classified/{id}` for listing details.
 
-Leboncoin currently protects `/finder/search` and sometimes the normal search page with DataDome for raw HTTP. The server keeps the API path implemented for endpoint checks, uses the normal search page first, then falls back to the Jina reader rendering when direct HTML returns a challenge.
+Leboncoin currently protects `/finder/search` and sometimes the normal search page with DataDome for raw HTTP. The server keeps the API path implemented for endpoint checks, uses the normal search page first, then falls back to Jina rendering and finally Obscura rendering when direct HTML returns a challenge.
 
 If `LEBONCOIN_USER_AGENT` is unset or empty, the server sends a browser-like default user agent.
 
@@ -21,9 +22,16 @@ Optional environment variables:
 
 ```bash
 LEBONCOIN_PROXY_URL=http://user:password@host:port
+LEBONCOIN_PROXY_ENABLED=true
+LEBONCOIN_COOKIE_ENABLED=true
 LEBONCOIN_COOKIE="datadome=..."
 LEBONCOIN_USER_AGENT="Mozilla/5.0 ..."
-JINA_READER_BASE=https://r.jina.ai/http://r.jina.ai/http://
+JINA_READER_BASE=https://r.jina.ai/http://
+JINA_PROXY_ENABLED=false
+OBSCURA_BIN=obscura
+OBSCURA_STEALTH=false
+OBSCURA_WAIT_UNTIL=networkidle0
+OBSCURA_TIMEOUT_SECONDS=30
 MCP_OAUTH_ENABLED=true
 PUBLIC_BASE_URL=https://your-private-mcp.example.com
 OAUTH_ISSUER=https://your-private-mcp.example.com
@@ -77,11 +85,21 @@ Use a proxy by creating a local `.env` next to `docker-compose.yml`:
 
 ```env
 LEBONCOIN_PROXY_URL=http://user:password@host:port
+LEBONCOIN_PROXY_ENABLED=true
+LEBONCOIN_COOKIE_ENABLED=true
 LEBONCOIN_COOKIE=datadome=optional_cookie
-JINA_READER_BASE=https://r.jina.ai/http://r.jina.ai/http://
+JINA_READER_BASE=https://r.jina.ai/http://
+JINA_PROXY_ENABLED=false
+OBSCURA_BIN=obscura
+OBSCURA_STEALTH=false
 ```
 
-The Jina fallback is enabled by default. It parses rendered Markdown, so search results include the main listing fields but can be less complete than the direct Leboncoin JSON/SSR payload.
+Set `LEBONCOIN_PROXY_ENABLED=false` to temporarily bypass the proxy without removing `LEBONCOIN_PROXY_URL`.
+Set `LEBONCOIN_COOKIE_ENABLED=false` to temporarily bypass the cookie without removing `LEBONCOIN_COOKIE`.
+
+The Jina fallback is enabled by default and bypasses `LEBONCOIN_PROXY_URL` unless `JINA_PROXY_ENABLED=true`. It parses rendered Markdown, so search results include the main listing fields but can be less complete than the direct Leboncoin JSON/SSR payload.
+
+The Obscura fallback is also supported and expects the `obscura` binary to be available on `PATH`, or `OBSCURA_BIN` to point to the extracted executable. It reuses `LEBONCOIN_PROXY_URL` when the proxy is enabled.
 
 ## Codex
 
@@ -147,6 +165,7 @@ OAuth is only enforced for requests whose `Host` or `X-Forwarded-Host` matches `
 
 ## Tools
 
+- `check_config`: shows sanitized proxy, cookie, Jina, Obscura, and direct HTML anti-bot diagnostics.
 - `check_endpoints`: probes the important endpoints and shows payload templates.
 - `search_listings`: searches listings with filters.
 - `batch_search_listings`: runs up to 20 searches in one MCP call, in parallel, then deduplicates listings by ID.

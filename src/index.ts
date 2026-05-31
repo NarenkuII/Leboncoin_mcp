@@ -5,10 +5,14 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import nodeHttp, { type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 type Listing = {
   list_id: number | string;
@@ -63,9 +67,20 @@ const oauthTokenTtlSeconds = Number(process.env.OAUTH_TOKEN_TTL_SECONDS ?? 3600)
 const oauthScopes = ["leboncoin:read"];
 const publicHost = new URL(publicBaseUrl).host.toLowerCase();
 
-const proxyUrl = process.env.LEBONCOIN_PROXY_URL;
+const proxyEnabled = process.env.LEBONCOIN_PROXY_ENABLED !== "false";
+const proxyUrl = proxyEnabled ? process.env.LEBONCOIN_PROXY_URL : undefined;
 const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
-const jinaReaderBase = process.env.JINA_READER_BASE || "https://r.jina.ai/http://r.jina.ai/http://";
+const cookieEnabled = process.env.LEBONCOIN_COOKIE_ENABLED !== "false";
+const leboncoinCookie = cookieEnabled ? process.env.LEBONCOIN_COOKIE : undefined;
+const jinaReaderBase = process.env.JINA_READER_BASE || "https://r.jina.ai/http://";
+const jinaProxyEnabled = process.env.JINA_PROXY_ENABLED === "true";
+const execFileAsync = promisify(execFile);
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const localObscuraCommand = path.resolve(moduleDir, "..", "vendor", "obscura", process.platform === "win32" ? "obscura.exe" : "obscura");
+const obscuraCommand = process.env.OBSCURA_BIN || (existsSync(localObscuraCommand) ? localObscuraCommand : "obscura");
+const obscuraTimeoutSeconds = Number(process.env.OBSCURA_TIMEOUT_SECONDS ?? 30);
+const obscuraWaitUntil = process.env.OBSCURA_WAIT_UNTIL || "networkidle0";
+const obscuraStealth = process.env.OBSCURA_STEALTH === "true";
 
 const userAgent =
   process.env.LEBONCOIN_USER_AGENT ||
@@ -105,7 +120,7 @@ function headers(accept = "application/json, text/plain, */*") {
     origin: WEB_BASE,
     referer: `${WEB_BASE}/recherche`
   };
-  if (process.env.LEBONCOIN_COOKIE) h.cookie = process.env.LEBONCOIN_COOKIE;
+  if (leboncoinCookie) h.cookie = leboncoinCookie;
   return h;
 }
 
@@ -262,6 +277,26 @@ async function searchViaHtml(args: SearchArgs) {
   return { source: "html", total, ads, url: firstUrl };
 }
 
+async function fetchHtmlViaObscura(url: string) {
+  const timeoutSeconds = Number.isFinite(obscuraTimeoutSeconds) && obscuraTimeoutSeconds > 0 ? obscuraTimeoutSeconds : 30;
+  const args: string[] = [];
+  if (proxyUrl) args.push("--proxy", proxyUrl);
+  args.push("fetch", url, "--dump", "html", "--wait-until", obscuraWaitUntil, "--timeout", String(timeoutSeconds), "--quiet");
+  if (obscuraStealth) args.push("--stealth");
+
+  try {
+    const { stdout } = await execFileAsync(obscuraCommand, args, {
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: (timeoutSeconds + 10) * 1000
+    });
+    return stdout;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Obscura fetch failed using "${obscuraCommand}": ${message}`);
+  }
+}
+
 function parseEuroPrice(value: string) {
   const normalized = value.replace(/\s/g, "").replace(",", ".");
   const price = Number.parseFloat(normalized);
@@ -340,19 +375,65 @@ function parseJinaSearchMarkdown(markdown: string, limit: number) {
 
 async function searchViaJina(args: SearchArgs) {
   const requestedLimit = Math.min(args.limit ?? 10, PAGE_SIZE);
-  const url = buildSearchUrl({ ...args, limit: requestedLimit, offset: args.offset ?? 0 });
-  const res = await http(jinaUrl(url.toString()), {
-    headers: {
-      accept: "text/markdown,text/plain;q=0.9,*/*;q=0.8",
-      origin: "",
-      referer: ""
+  const primaryUrl = buildSearchUrl({ ...args, limit: requestedLimit, offset: args.offset ?? 0 });
+  const relaxedUrl = buildSearchUrl({ ...args, sortBy: undefined, limit: requestedLimit, offset: args.offset ?? 0 });
+  const urls = [primaryUrl.toString(), relaxedUrl.toString()].filter((url, index, all) => all.indexOf(url) === index);
+  const failures: string[] = [];
+
+  for (const url of urls) {
+    const res = await undiciFetch(jinaUrl(url), {
+      dispatcher: jinaProxyEnabled ? dispatcher : undefined,
+      headers: {
+        accept: "text/markdown,text/plain;q=0.9,*/*;q=0.8",
+        "user-agent": userAgent,
+        "accept-language": "fr-FR,fr;q=0.9,en;q=0.8"
+      }
+    } as Parameters<typeof undiciFetch>[1]);
+    const markdown = await res.text();
+    if (!res.ok) {
+      failures.push(`${url} failed ${res.status}: ${markdown.slice(0, 160)}`);
+      continue;
     }
-  });
-  const markdown = await res.text();
-  if (!res.ok) throw new Error(`Jina search fallback failed ${res.status}: ${markdown.slice(0, 220)}`);
-  const parsed = parseJinaSearchMarkdown(markdown, requestedLimit);
-  if (!parsed.ads.length) throw new Error("Jina search fallback did not find listings in the rendered page.");
-  return { source: "jina", total: parsed.total, ads: parsed.ads, url: url.toString() };
+    const parsed = parseJinaSearchMarkdown(markdown, requestedLimit);
+    if (parsed.ads.length) return { source: "jina", total: parsed.total, ads: parsed.ads, url };
+    failures.push(`${url} did not contain parsable ad links`);
+  }
+
+  throw new Error(`Jina search fallback did not find listings in the rendered page. ${failures.join("; ")}`);
+}
+
+async function searchViaObscura(args: SearchArgs) {
+  const requestedLimit = Math.min(args.limit ?? 10, 300);
+  const startOffset = args.offset ?? 0;
+  const ads: NormalizedListing[] = [];
+  const seen = new Set<string>();
+  let total: number | undefined;
+  let firstUrl = "";
+
+  for (let pageOffset = startOffset; ads.length < requestedLimit; pageOffset = (Math.floor(pageOffset / PAGE_SIZE) + 1) * PAGE_SIZE) {
+    const url = buildSearchUrl({ ...args, limit: PAGE_SIZE, offset: pageOffset });
+    if (!firstUrl) firstUrl = url.toString();
+    const html = await fetchHtmlViaObscura(url.toString());
+    const data = parseNextData(html);
+    const searchData = data?.props?.pageProps?.searchData ?? {};
+    total = total ?? searchData.total ?? searchData.total_all;
+    const pageAds = [...(searchData.ads ?? []), ...(searchData.ads_alu ?? [])].map(normalizeListing);
+    const offsetInsidePage = pageOffset === startOffset ? startOffset % PAGE_SIZE : 0;
+    const usableAds = pageAds.slice(offsetInsidePage);
+
+    if (!usableAds.length) break;
+    for (const ad of usableAds) {
+      if (!seen.has(ad.id)) {
+        seen.add(ad.id);
+        ads.push(ad);
+        if (ads.length >= requestedLimit) break;
+      }
+    }
+    if (total !== undefined && pageOffset + PAGE_SIZE >= total) break;
+  }
+
+  if (!ads.length) throw new Error("Obscura search fallback did not find listings in the rendered page.");
+  return { source: "obscura", total, ads, url: firstUrl };
 }
 
 async function search(args: SearchArgs) {
@@ -362,9 +443,16 @@ async function search(args: SearchArgs) {
     try {
       return await searchViaJina(args);
     } catch (jinaError) {
-      const htmlMessage = htmlError instanceof Error ? htmlError.message : String(htmlError);
-      const jinaMessage = jinaError instanceof Error ? jinaError.message : String(jinaError);
-      throw new Error(`Leboncoin search failed. HTML fallback: ${htmlMessage}. Jina fallback: ${jinaMessage}`);
+      try {
+        return await searchViaObscura(args);
+      } catch (obscuraError) {
+        const htmlMessage = htmlError instanceof Error ? htmlError.message : String(htmlError);
+        const jinaMessage = jinaError instanceof Error ? jinaError.message : String(jinaError);
+        const obscuraMessage = obscuraError instanceof Error ? obscuraError.message : String(obscuraError);
+        throw new Error(
+          `Leboncoin search failed. HTML fallback: ${htmlMessage}. Jina fallback: ${jinaMessage}. Obscura fallback: ${obscuraMessage}`
+        );
+      }
     }
   }
 }
@@ -448,6 +536,84 @@ function stats(values: number[]) {
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+function maskUrlSecret(value?: string) {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.username) url.username = "***";
+    if (url.password) url.password = "***";
+    return url.toString();
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+function cookieDiagnostics(value?: string) {
+  const pairs = (value ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const names = pairs.map((pair) => pair.split("=")[0]).filter(Boolean);
+  return {
+    configured: Boolean(value),
+    enabled: cookieEnabled,
+    active: Boolean(leboncoinCookie),
+    names,
+    hasDatadome: names.some((name) => name.toLowerCase() === "datadome"),
+    length: value?.length ?? 0
+  };
+}
+
+function isDataDomeChallenge(text: string) {
+  return /datadome|captcha-delivery|Please enable JS and disable any ad blocker/i.test(text);
+}
+
+async function checkObscuraRuntime() {
+  try {
+    await execFileAsync(obscuraCommand, ["--help"], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 1024 * 1024
+    });
+    return { available: true };
+  } catch (error) {
+    return {
+      available: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function probeLeboncoinHtml() {
+  const url = buildSearchUrl({ query: "macbook", limit: 1 });
+  try {
+    const res = await http(url.toString(), {
+      headers: {
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        origin: "",
+        referer: WEB_BASE
+      }
+    });
+    const html = await res.text();
+    return {
+      ok: res.ok,
+      status: res.status,
+      url: url.toString(),
+      nextDataDetected: html.includes("__NEXT_DATA__"),
+      dataDomeDetected: isDataDomeChallenge(html)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: undefined,
+      url: url.toString(),
+      nextDataDetected: false,
+      dataDomeDetected: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 type OAuthCode = {
@@ -579,12 +745,43 @@ const batchSearchItemSchema = {
 function createLeboncoinServer() {
 const server = new McpServer({ name: "leboncoin-mcp", version: "1.0.0" });
 
+server.tool("check_config", "Show sanitized Leboncoin MCP configuration and anti-bot diagnostics.", {}, async () => {
+  const [obscura, htmlProbe] = await Promise.all([checkObscuraRuntime(), probeLeboncoinHtml()]);
+  return textResult({
+    proxy: {
+      configured: Boolean(process.env.LEBONCOIN_PROXY_URL),
+      enabled: proxyEnabled,
+      active: Boolean(proxyUrl),
+      url: maskUrlSecret(process.env.LEBONCOIN_PROXY_URL)
+    },
+    cookie: cookieDiagnostics(process.env.LEBONCOIN_COOKIE),
+    jina: {
+      base: jinaReaderBase,
+      proxyEnabled: jinaProxyEnabled,
+      proxyActive: Boolean(jinaProxyEnabled && dispatcher)
+    },
+    obscura: {
+      command: obscuraCommand,
+      localBinaryDetected: existsSync(localObscuraCommand),
+      timeoutSeconds: obscuraTimeoutSeconds,
+      waitUntil: obscuraWaitUntil,
+      stealth: obscuraStealth,
+      ...obscura
+    },
+    probe: {
+      directHtml: htmlProbe
+    }
+  });
+});
+
 server.tool("check_endpoints", "Probe Leboncoin endpoints and return current HTTP status plus payload templates.", {}, async () => {
   const sample: SearchArgs = { query: "macbook", limit: 3 };
   const checks: Record<string, unknown> = {};
   for (const [name, run] of Object.entries({
     searchApi: () => searchViaApi(sample),
     searchHtml: () => searchViaHtml(sample),
+    searchJina: () => searchViaJina(sample),
+    searchObscura: () => searchViaObscura(sample),
     detailApi: () => getDetails("3194209348")
   })) {
     try {
@@ -598,6 +795,27 @@ server.tool("check_endpoints", "Probe Leboncoin endpoints and return current HTT
     endpoints: {
       search: { method: "POST", url: `${API_BASE}/finder/search`, payload: buildSearchPayload(sample) },
       searchFallback: { method: "GET", url: buildSearchUrl(sample).toString(), parser: "__NEXT_DATA__.props.pageProps.searchData.ads" },
+      jinaFallback: {
+        method: "GET",
+        url: jinaUrl(buildSearchUrl(sample).toString()),
+        parser: "rendered Markdown ad links"
+      },
+      obscuraFallback: {
+        command: obscuraCommand,
+        args: [
+          ...(proxyUrl ? ["--proxy", "<LEBONCOIN_PROXY_URL>"] : []),
+          "fetch",
+          buildSearchUrl(sample).toString(),
+          "--dump",
+          "html",
+          "--wait-until",
+          obscuraWaitUntil,
+          "--timeout",
+          String(obscuraTimeoutSeconds),
+          "--quiet",
+          ...(obscuraStealth ? ["--stealth"] : [])
+        ]
+      },
       details: { method: "GET", url: `${API_BASE}/finder/classified/{list_id}` },
       phone: { method: "GET", url: `${API_BASE}/api/utils/phonenumber.json`, note: "Requires authenticated session; intentionally not implemented." }
     },
