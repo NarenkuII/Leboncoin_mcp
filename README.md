@@ -1,23 +1,74 @@
 # Leboncoin MCP Server
 
-Low-resource MCP server for Leboncoin. Search uses the public SSR search page:
+Low-resource Model Context Protocol (MCP) server for searching and retrieving listings from Leboncoin with anti-bot fallback strategies.
 
-- `GET https://www.leboncoin.fr/recherche?...`, parsing `__NEXT_DATA__`.
-- `GET https://r.jina.ai/http://https://www.leboncoin.fr/recherche?...` as a rendered Markdown fallback when DataDome blocks direct HTML.
-- `obscura fetch https://www.leboncoin.fr/recherche?... --dump html` as an optional browser-rendered fallback.
-- `GET https://api.leboncoin.fr/finder/classified/{id}` for listing details.
-- `GET https://r.jina.ai/http://https://www.leboncoin.fr/ad/{category}/{id}` as a listing-details fallback when the details API is blocked.
+## Resolution Pipeline
 
-Leboncoin currently protects `/finder/search` and sometimes the normal search page with DataDome for raw HTTP. The server keeps the API path implemented for endpoint checks, uses the normal search page first, then falls back to Jina rendering and finally Obscura rendering when direct HTML returns a challenge.
+```text
+Direct SSR (__NEXT_DATA__) -> Jina Reader Fallback -> Obscura Headless Fallback
+```
 
-If `LEBONCOIN_USER_AGENT` is unset or empty, the server sends a browser-like default user agent.
+The server attempts direct server-side rendered (SSR) JSON parsing first, automatically falling back to rendered Markdown/headless retrieval when anti-bot challenges are encountered.
 
-## Setup
+## Features
+
+- **Multi-Source Search**: Structured querying with price, category, and sorting filters.
+- **Batch Processing**: Parallel multi-query execution with deduplication (`batch_search_listings`).
+- **Resilient Listing Extraction**: Full ad details extraction using API, JSON-LD, or rendered page fallbacks.
+- **Multi-Transport MCP**: Supports stdio, Streamable HTTP (`/mcp`), and SSE (`/sse`).
+- **OAuth 2.0 PKCE Support**: Built-in authorization server for secure LLM/ChatGPT integration.
+
+## Available Tools
+
+- `search_listings`: Queries listings with filters.
+- `batch_search_listings`: Runs up to 20 parallel search queries with automatic deduplication.
+- `get_listing_details`: Retrieves full metadata and attributes for a listing.
+- `get_listing_details_batch`: Batch listing metadata retrieval.
+- `analyze_market_price`: Aggregates price statistics for market estimation.
+- `search_multi_region`: Executes searches across multiple regional filters.
+- `watch_new_listings`: State tracker reporting newly posted listings.
+- `check_config`: Reports current proxy, anti-bot, and fallback subsystem diagnostics.
+- `check_endpoints`: Probes endpoint health and response payloads.
+
+## Setup & Running
+
+### Build
 
 ```bash
+git clone https://github.com/NarenkuII/Leboncoin_mcp.git
+cd Leboncoin_mcp
 npm install
 npm run build
 ```
+
+### Docker Deployment
+
+```bash
+docker compose up --build -d
+```
+
+Endpoints exposed:
+- `http://localhost:3000/mcp` (Streamable HTTP)
+- `http://localhost:3000/sse` (Server-Sent Events)
+- `http://localhost:3000/health` (Health Check)
+
+### MCP Client Configuration (e.g. Claude Desktop / Codex)
+
+```json
+{
+  "mcpServers": {
+    "leboncoin": {
+      "command": "node",
+      "args": ["/path/to/Leboncoin_mcp/dist/index.js"],
+      "env": {
+        "LEBONCOIN_PROXY_URL": "http://user:password@proxy-host:port"
+      }
+    }
+  }
+}
+```
+
+## Environment Configuration
 
 Optional environment variables:
 
@@ -30,181 +81,23 @@ LEBONCOIN_USER_AGENT="Mozilla/5.0 ..."
 JINA_READER_BASE=https://r.jina.ai/http://
 JINA_PROXY_ENABLED=false
 OBSCURA_BIN=obscura
-OBSCURA_STEALTH=false
-OBSCURA_WAIT_UNTIL=networkidle0
-OBSCURA_TIMEOUT_SECONDS=30
-MCP_OAUTH_ENABLED=true
-PUBLIC_BASE_URL=https://your-private-mcp.example.com
-OAUTH_ISSUER=https://your-private-mcp.example.com
+MCP_OAUTH_ENABLED=false
+PUBLIC_BASE_URL=https://your-mcp-domain.example.com
+OAUTH_ISSUER=https://your-mcp-domain.example.com
 ```
 
-## Claude Desktop config
+## OAuth 2.0 for ChatGPT Apps
 
-```json
-{
-  "mcpServers": {
-    "leboncoin": {
-      "command": "node",
-      "args": ["C:\\Users\\Narenku\\Documents\\00000000000_peip_2_2025-2026\\MMD\\video\\leboncoin-mcp\\dist\\index.js"],
-      "env": {
-        "LEBONCOIN_PROXY_URL": "http://user:password@host:port"
-      }
-    }
-  }
-}
-```
-
-## Docker
-
-Build and run the MCP server as an HTTP service:
-
-```bash
-docker compose up --build
-```
-
-Health check:
-
-```bash
-curl http://localhost:3000/health
-```
-
-For the mini PC deployment in this workspace, the intended LAN endpoint is:
-
-```text
-http://192.168.1.18:3010/mcp
-```
-
-Keep `HOST_PORT=3010` in the deployment `.env` before running `docker compose up --build -d`.
-
-The container exposes:
-
-- `http://localhost:3000/mcp` for MCP Streamable HTTP clients.
-- `http://localhost:3000/sse` for older SSE MCP clients, including n8n's MCP Client Tool.
-- `http://localhost:3000/messages` as the SSE message POST endpoint used automatically by MCP clients.
-
-Use a proxy by creating a local `.env` next to `docker-compose.yml`:
-
-```env
-LEBONCOIN_PROXY_URL=http://user:password@host:port
-LEBONCOIN_PROXY_ENABLED=true
-LEBONCOIN_COOKIE_ENABLED=true
-LEBONCOIN_COOKIE=datadome=optional_cookie
-JINA_READER_BASE=https://r.jina.ai/http://
-JINA_PROXY_ENABLED=false
-OBSCURA_BIN=obscura
-OBSCURA_STEALTH=false
-```
-
-Set `LEBONCOIN_PROXY_ENABLED=false` to temporarily bypass the proxy without removing `LEBONCOIN_PROXY_URL`.
-Set `LEBONCOIN_COOKIE_ENABLED=false` to temporarily bypass the cookie without removing `LEBONCOIN_COOKIE`.
-
-The Jina fallback is enabled by default and bypasses `LEBONCOIN_PROXY_URL` unless `JINA_PROXY_ENABLED=true`. It parses rendered Markdown, so search results include the main listing fields but can be less complete than the direct Leboncoin JSON/SSR payload.
-
-Some Jina-rendered search pages include normal ad URLs; others include only compact text rows. The server supports both formats. Compact rows return stable synthetic IDs such as `jina-...` and may not include image or listing URL fields. Use full Leboncoin listing URLs when you need `get_listing_details` while the API is blocked.
-
-Listing details use the Leboncoin details API first. If that API is blocked and the input is a full listing URL, the server falls back to Jina-rendered listing pages and returns title, price, category, location, seller, images, description, and key attributes. If the input is only a numeric ID, the fallback cannot infer the category URL, so ID-only details still depend on the API path.
-
-The Obscura fallback is also supported and expects the `obscura` binary to be available on `PATH`, or `OBSCURA_BIN` to point to the extracted executable. It reuses `LEBONCOIN_PROXY_URL` when the proxy is enabled.
-
-## Codex
-
-Codex-style local MCP clients normally use stdio. Point the client at the built script:
-
-```json
-{
-  "mcpServers": {
-    "leboncoin": {
-      "command": "node",
-      "args": [
-        "C:\\Users\\Narenku\\Documents\\00000000000_peip_2_2025-2026\\MMD\\video\\leboncoin-mcp\\dist\\index.js"
-      ],
-      "env": {
-        "LEBONCOIN_PROXY_URL": "http://user:password@host:port"
-      }
-    }
-  }
-}
-```
-
-If your MCP client supports HTTP directly, use:
-
-```text
-http://localhost:3000/mcp
-```
-
-If the MCP client runs inside another Docker container, use the Compose service name:
-
-```text
-http://leboncoin-mcp:3000/mcp
-```
-
-## n8n
-
-n8n has two relevant MCP nodes:
-
-- `MCP Client` can use an MCP endpoint URL. Use `http://leboncoin-mcp:3000/mcp` when n8n is in the same Compose network, or `http://host.docker.internal:3000/mcp` when n8n runs in Docker Desktop separately.
-- `MCP Client Tool` for AI Agents asks for an SSE endpoint. Use `http://leboncoin-mcp:3000/sse` or `http://host.docker.internal:3000/sse`.
-
-Authentication can stay `None` unless you put this service behind a reverse proxy.
-
-## ChatGPT Apps OAuth
-
-For a ChatGPT workspace app, do not protect the reverse proxy with a hardcoded Bearer token. Enable the built-in OAuth flow instead:
+When deploying behind a public reverse proxy for ChatGPT Actions or Workspace integration:
 
 ```env
 MCP_OAUTH_ENABLED=true
-PUBLIC_BASE_URL=https://your-private-mcp.example.com
-OAUTH_ISSUER=https://your-private-mcp.example.com
+PUBLIC_BASE_URL=https://your-mcp-domain.example.com
+OAUTH_ISSUER=https://your-mcp-domain.example.com
 ```
 
-The server then exposes:
-
+The server exposes standard discovery endpoints:
 - `/.well-known/oauth-protected-resource`
 - `/.well-known/oauth-authorization-server`
 - `/authorize`
 - `/token`
-
-Unauthenticated MCP requests return a `WWW-Authenticate` challenge pointing ChatGPT to the protected resource metadata. ChatGPT completes the authorization-code + PKCE flow, receives a Bearer access token, and sends that token on `/mcp`, `/sse`, and `/messages`.
-
-OAuth is only enforced for requests whose `Host` or `X-Forwarded-Host` matches `PUBLIC_BASE_URL`. Keep any public endpoint private or OAuth-protected; LAN/Docker calls such as `http://192.168.1.18:3000/sse` or `http://leboncoin-mcp:3000/sse` remain usable without OAuth when they do not match `PUBLIC_BASE_URL`.
-
-## Tools
-
-- `check_config`: shows sanitized proxy, cookie, Jina, Obscura, and direct HTML anti-bot diagnostics.
-- `check_endpoints`: probes the important endpoints and shows payload templates.
-- `search_listings`: searches listings with filters.
-- `batch_search_listings`: runs up to 20 searches in one MCP call, in parallel, then deduplicates listings by ID.
-- `get_listing_details`: gets full details from a listing URL or ID. Full URLs can use the Jina fallback if the API is blocked.
-- `get_listing_details_batch`: gets full details for up to 50 listing URLs or IDs in one MCP call. Full URLs can use the Jina fallback if the API is blocked.
-- `analyze_market_price`: compares a target price/listing with similar results.
-- `search_multi_region`: runs searches across multiple departments/zipcodes.
-- `watch_new_listings`: stores/checks watch definitions and returns newly seen ads.
-
-Latest smoke test coverage against the built MCP:
-
-- Passing through Jina fallback with direct Leboncoin HTTP forced to fail: `check_config`, `check_endpoints`, `search_listings`, `batch_search_listings`, `search_multi_region`, `analyze_market_price`, `watch_new_listings`, `get_listing_details`, and `get_listing_details_batch`.
-- `check_endpoints` may still report `searchApi`, direct `searchHtml`, Obscura, or `detailApi` as blocked. That is diagnostic output; normal search/detail tools can still succeed through Jina fallback.
-
-For n8n agents, prefer the batch tools when checking product variants:
-
-```json
-{
-  "searches": [
-    { "query": "samsung s24", "sortBy": "price", "sortOrder": "asc", "minPrice": 150, "limit": 30 },
-    { "query": "galaxy s24", "sortBy": "price", "sortOrder": "asc", "minPrice": 150, "limit": 30 },
-    { "query": "samsung s25", "sortBy": "price", "sortOrder": "asc", "minPrice": 200, "limit": 30 }
-  ],
-  "limitPerSearch": 30,
-  "maxResults": 100
-}
-```
-
-`limitPerSearch` controls how many results each query variant fetches, using pagination when it is above one Leboncoin page. `maxResults` only caps the final merged/deduplicated output. For example, 9 very similar queries with `limitPerSearch: 35` may return fewer than 300 unique listings after deduplication; use `limitPerSearch: 100` with `maxResults: 300` when you want the batch to fill 300 results.
-
-Then send the selected listing IDs to `get_listing_details_batch`:
-
-```json
-{
-  "listings": ["3194392810", "3182346665", "3145491157"]
-}
-```
